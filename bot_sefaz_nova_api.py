@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import discord
 from discord.ext import commands, tasks
 import requests
@@ -41,82 +40,97 @@ EMOJI_DESCONHECIDO = "❓"
 
 
 def get_sefaz_status(autorizador_filtro=None):
-    """
-    Busca o status dos serviços NFe/NFCe/CTe da SEFAZ utilizando a API v2 da WebmaniaBR.
-    """
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; MonitorSEFAZBot/1.0)"} 
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; MonitorSEFAZBot/1.0; +https://github.com/your-repo)"} # Use um User-Agent descritivo e, se tiver, um link para seu projeto
         response = requests.get(API_URL, headers=headers, timeout=20)
         response.raise_for_status()
         data = response.json()
 
         components = data.get("components", [])
         
-        status_monitorados = []
+        status_por_chave = {} 
+        
+        UFS_VALIDAS = ["AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO", "SVRS", "AN", "NACIONAL"]
+        SERVICOS_VALIDOS = ["NFE", "NFCE", "CTE", "MDFE", "BPE", "EPEC"]
+
         for comp in components:
             name = comp.get("name", "").strip()
             status_id = comp.get("status_id") 
             
-            autorizador = "Desconhecido"
-            servico_tipo = "Serviço"
-            
-            match_autorizador_servico = re.match(r'(?:SEFAZ\s)?(AM|BA|CE|GO|MG|MS|MT|PE|PR|RS|SP|SVRS|AN|Nacional)\s*-\s*(NFe|NFCe|CTe|MDFe|BPe|EPEC)', name, re.IGNORECASE)
-            
-            if match_autorizador_servico:
-                autorizador = match_autorizador_servico.group(1).upper().replace('SEFAZ ', '')
-                servico_tipo = match_autorizador_servico.group(2).upper()
+            autorizador = None 
+            servico_tipo = None 
+
+            match = re.search(r'(?:SEFAZ\s)?(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO|SVRS|AN)\s*-\s*(NFe|NFCe|CTe|MDFe|BPe|EPEC)', name, re.IGNORECASE)
+            if match:
+                autorizador = match.group(1).upper().replace('SEFAZ ', '')
+                servico_tipo = match.group(2).upper()
             else:
-                if 'NFe Nacional' in name:
-                    autorizador = "Nacional"
-                    servico_tipo = "NFe"
-                elif 'NFCe Nacional' in name:
-                    autorizador = "Nacional"
-                    servico_tipo = "NFCe"
-                elif 'CTe Nacional' in name:
-                    autorizador = "Nacional"
-                    servico_tipo = "CTe"
+                match_nacional = re.search(r'(NFe|NFCe|CTe|MDFe|BPe)\s+Nacional', name, re.IGNORECASE)
+                if match_nacional:
+                    autorizador = "NACIONAL"
+                    servico_tipo = match_nacional.group(1).upper()
                 else:
-                    autorizador = "Outros" 
-                    servico_tipo = name 
+                    uf_inferida_match = re.search(r'(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO|SVRS|AN)', name, re.IGNORECASE)
+                    servico_inferido_match = re.search(r'(NFe|NFCe|CTe|MDFe|BPe|EPEC)', name, re.IGNORECASE)
 
-
+                    if uf_inferida_match and servico_inferido_match:
+                        autorizador = uf_inferida_match.group(1).upper()
+                        servico_tipo = servico_inferido_match.group(1).upper()
+                    else:
+                        logger.debug(f"Componente '{name}' não pôde ser classificado claramente. Ignorando para monitoramento detalhado.")
+                        continue 
+            
             status_texto, status_emoji = STATUS_DESCONHECIDO, EMOJI_DESCONHECIDO
+            
             if status_id == 1: 
                 status_texto, status_emoji = STATUS_OPERACIONAL, EMOJI_ONLINE
-            elif status_id == 2 or status_id == 3:
+            elif status_id == 2 or status_id == 3: 
                 status_texto, status_emoji = STATUS_INSTABILIDADE, EMOJI_INSTAVEL
             elif status_id == 4: 
                 status_texto, status_emoji = STATUS_FORA_DE_OPERACAO, EMOJI_OFFLINE
+
+            chave_servico = f"{autorizador}-{servico_tipo}"
             
-            status_monitorados.append({
-                "autorizador": autorizador,
-                "servico_tipo": servico_tipo,
-                "status": status_texto,
-                "emoji": status_emoji,
-                "detalhes": name 
-            })
+            current_status = status_por_chave.get(chave_servico, {})
+            current_status_priority = {
+                STATUS_OPERACIONAL: 0,
+                STATUS_INSTABILIDADE: 1,
+                STATUS_FORA_DE_OPERACAO: 2,
+                STATUS_DESCONHECIDO: -1
+            }
+            
+            if (chave_servico not in status_por_chave or 
+                current_status_priority.get(status_texto, -1) > current_status_priority.get(current_status.get('status'), -1)):
+                
+                status_por_chave[chave_servico] = {
+                    "autorizador": autorizador,
+                    "servico_tipo": servico_tipo,
+                    "status": status_texto,
+                    "emoji": status_emoji,
+                    "detalhes": name 
+                }
         
+        status_final_processado = list(status_por_chave.values())
+
         if autorizador_filtro:
             uf_filtro = autorizador_filtro.upper()
             
-            incidentes_filtrados = [
-                s for s in status_monitorados 
-                if (s["autorizador"].upper() == uf_filtro or (uf_filtro == 'AN' and s["autorizador"] == 'AN') or (uf_filtro == 'NACIONAL' and s["autorizador"] == 'NACIONAL'))
-                and s["status"] != STATUS_OPERACIONAL
+            status_para_uf = [
+                s for s in status_final_processado 
+                if s["autorizador"].upper() == uf_filtro or (s["autorizador"] == "NACIONAL" and uf_filtro in ["NACIONAL", "AN"])
             ]
             
-            if incidentes_filtrados:
-                return incidentes_filtrados, None
-            else:
-
+            if not status_para_uf:
                 return [{
                     "autorizador": uf_filtro,
-                    "servico_tipo": "NFe/NFCe", 
+                    "servico_tipo": "NFe/NFCe",
                     "status": STATUS_OPERACIONAL,
                     "emoji": EMOJI_ONLINE
                 }], None
+            
+            return status_para_uf, None
         
-        return [s for s in status_monitorados if s["status"] != STATUS_OPERACIONAL], None
+        return [s for s in status_final_processado if s["status"] != STATUS_OPERACIONAL and s["status"] != STATUS_DESCONHECIDO], None
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Erro de requisição ao acessar a API WebmaniaBR v2: {e}")
@@ -124,7 +138,7 @@ def get_sefaz_status(autorizador_filtro=None):
     except Exception as e:
         logger.error(f"Ocorreu um erro inesperado em get_sefaz_status (API v2): {e}", exc_info=True)
         return None, f"Ocorreu um erro inesperado ao processar os dados da API v2: {e}"
-
+    
 def get_sat_sp_status():
     """
     Busca o status do sistema SAT da SEFAZ-SP por web scraping.
@@ -148,9 +162,6 @@ def get_sat_sp_status():
         return {"servico_tipo": "CF-e (SAT)", "status": STATUS_DESCONHECIDO, "emoji": EMOJI_DESCONHECIDO}
 
 def get_mfe_ce_status():
-    """
-    Busca o status do sistema MFE da SEFAZ-CE por web scraping.
-    """
     URL = "https://www.sefaz.ce.gov.br/mfe-status-servicos/"
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; MonitorSEFAZBot/1.0)"}
